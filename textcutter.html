@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Smart Cutter – 4–5k Zeichen Chunks</title>
+<style>
+  :root { --bg:#0b0b0f; --ink:#e8e8ef; --muted:#9aa0a6; --accent:#7c4dff; --accent-2:#00d4ff; --ok:#19c37d; }
+  * { box-sizing:border-box }
+  body {
+    margin:0; font:14.5px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+    color:var(--ink); background:linear-gradient(180deg,#0b0b0f 0%, #0f0f18 100%); padding:24px;
+  }
+  .wrap { max-width:1100px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 12px }
+  .sub { color:var(--muted); margin-bottom:18px }
+  .card {
+    background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+    border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,.25);
+  }
+  textarea, input, button { font:inherit; color:inherit }
+  textarea {
+    width:100%; min-height:220px; resize:vertical; background:#0e0e16; color:var(--ink);
+    border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:12px 14px; outline:none;
+  }
+  textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(124,77,255,.2) }
+  .controls { margin:14px 0 8px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  .pill {
+    background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.1);
+    padding:8px 10px; border-radius:12px; display:flex; align-items:center; gap:8px;
+  }
+  .pill input[type="number"] { width:110px; padding:6px 8px; border-radius:8px; border:1px solid rgba(255,255,255,.12); background:#0e0e16 }
+  .btn {
+    padding:10px 14px; border-radius:12px; border:1px solid rgba(255,255,255,.1);
+    background:linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    color:#0a0a0a; font-weight:600; cursor:pointer;
+  }
+  .btn.secondary { background:transparent; color:var(--ink); border:1px solid rgba(255,255,255,.18) }
+  .metrics { color:var(--muted); margin:8px 0 0; display:flex; gap:16px; flex-wrap:wrap }
+  .divider { height:1px; background:rgba(255,255,255,.08); margin:18px 0 }
+  .chunk { margin:16px 0; padding:14px; border:1px dashed rgba(255,255,255,.15); border-radius:12px; background:rgba(0,0,0,.15) }
+  .chunk header { display:flex; gap:10px; align-items:center; justify-content:space-between; margin-bottom:8px }
+  .badge {
+    display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px;
+    background:rgba(124,77,255,.15); border:1px solid rgba(124,77,255,.35); color:#d7c9ff; font-weight:600;
+  }
+  .tags { color:var(--muted); font-size:12.5px }
+  .copy {
+    padding:8px 12px; border-radius:10px; border:1px solid rgba(255,255,255,.15);
+    background:#101018; color:var(--ink); cursor:pointer; transition:all .2s ease;
+  }
+  .copy.ok {
+    background:linear-gradient(135deg, #19c37d 0%, #11a86b 100%);
+    border-color:rgba(25,195,125,.6); color:#031f13;
+  }
+  .hint { color:var(--muted); font-size:12.5px; margin-top:8px }
+  .footer-note { color:var(--muted); font-size:12.5px; margin-top:8px }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Smart Cutter</h1>
+    <div class="sub">Schneidet nach <b>Punkt (.)</b> in ~4–5k <b>Zeichen</b> pro Teil – ohne Sätze zu brechen.</div>
+
+    <div class="card">
+      <label for="input">Quelltext</label>
+      <textarea id="input" placeholder="Füge hier Deinen Text ein …"></textarea>
+
+      <div class="controls">
+        <div class="pill">
+          <span>Ziel-Zeichen</span>
+          <input id="target" type="number" min="4000" max="5000" step="50" value="4500" />
+        </div>
+        <button id="cut" class="btn">CUT NOW</button>
+        <button id="clear" class="btn secondary">Zurücksetzen</button>
+      </div>
+
+      <div class="metrics">
+        <span>Gesamtzeichen: <b id="totalChars">0</b></span>
+        <span>Teile: <b id="parts">0</b></span>
+        <span>Spanne: <b>min 4000 / max 5000</b></span>
+      </div>
+
+      <div class="divider"></div>
+      <div id="results"></div>
+
+      <div class="footer-note">
+        Logik: Satzende an <code>.</code>; extrem lange „Sätze“ werden hart auf Zeichenbasis segmentiert.
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const elInput = document.getElementById('input');
+  const elCut = document.getElementById('cut');
+  const elClear = document.getElementById('clear');
+  const elTarget = document.getElementById('target');
+  const elResults = document.getElementById('results');
+  const elTotalChars = document.getElementById('totalChars');
+  const elParts = document.getElementById('parts');
+
+  const MIN_CHARS = 4000;
+  const MAX_CHARS = 5000;
+
+  // Unicode-sicher: Codepoints statt Codeunits (Emojis etc. korrekt)
+  const charLen = (s) => Array.from(s || '').length;
+
+  function softNormalize(s) {
+    return (s || '')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function splitIntoDotSentences(text) {
+    // Sätze enden bei Punkt. Punkt bleibt erhalten. Whitespace danach gehört dazu.
+    const re = /[^.]*\.(?:\s+|$)/gsu;
+    const matches = text.match(re);
+    if (matches && matches.length) {
+      const consumed = matches.join('').length;
+      const remainder = text.slice(consumed);
+      if (remainder.trim().length) matches.push(remainder);
+      return matches;
+    }
+    return [text];
+  }
+
+  function chunkByChars(text, targetChars, minChars = MIN_CHARS, maxChars = MAX_CHARS) {
+    const sentences = splitIntoDotSentences(text);
+    const chunks = [];
+    let current = '';
+    let curChars = 0;
+
+    for (const sent of sentences) {
+      const sLen = charLen(sent);
+
+      // Edge Case: ein extrem langer "Satz" -> hart auf Codepoint-Basis segmentieren
+      if (sLen > maxChars + 800) {
+        if (curChars > 0) {
+          chunks.push(current.trim());
+          current = '';
+          curChars = 0;
+        }
+        const cps = Array.from(sent);
+        for (let start = 0; start < cps.length; start += maxChars) {
+          const slice = cps.slice(start, start + maxChars).join('');
+          chunks.push(slice.trim());
+        }
+        continue;
+      }
+
+      if (curChars + sLen <= maxChars) {
+        current += sent;
+        curChars += sLen;
+      } else {
+        if (curChars >= minChars) {
+          chunks.push(current.trim());
+          current = sent;
+          curChars = sLen;
+        } else {
+          // Unter Minimum: kontrollierter Overrun, um Satzintegrität zu halten
+          current += sent;
+          curChars += sLen;
+          chunks.push(current.trim());
+          current = '';
+          curChars = 0;
+        }
+      }
+
+      // Soft-Close nahe Zielgröße
+      if (curChars >= targetChars && curChars >= minChars) {
+        chunks.push(current.trim());
+        current = '';
+        curChars = 0;
+      }
+    }
+
+    if (current.trim()) {
+      // Letzten kleinen Rest mit Vorgänger mergen, wenn sinnvoll
+      if (chunks.length) {
+        const last = chunks[chunks.length - 1];
+        const lastLen = charLen(last);
+        const cur = current.trim();
+        const curLen = charLen(cur);
+        if (curLen < Math.min(1200, targetChars * 0.3) && lastLen + curLen <= (MAX_CHARS + 300)) {
+          chunks[chunks.length - 1] = (last + (last.endsWith('\n') ? '' : ' ') + cur).trim();
+          current = '';
+        }
+      }
+      if (current.trim()) chunks.push(current.trim());
+    }
+
+    return chunks;
+  }
+
+  function renderChunks(chunks) {
+    elResults.innerHTML = '';
+    chunks.forEach((chunk, idx) => {
+      const chars = charLen(chunk);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'chunk';
+
+      const header = document.createElement('header');
+      const left = document.createElement('div');
+      const right = document.createElement('div');
+
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = `Teil ${idx + 1}`;
+
+      const tags = document.createElement('span');
+      tags.className = 'tags';
+      tags.textContent = `Zeichen: ${chars.toLocaleString('de-DE')}`;
+
+      left.appendChild(badge);
+      left.appendChild(tags);
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'copy';
+      copyBtn.type = 'button';
+      copyBtn.textContent = 'Kopieren';
+      copyBtn.setAttribute('aria-pressed', 'false');
+
+      copyBtn.addEventListener('click', async () => {
+        const doMarkOk = () => {
+          copyBtn.classList.add('ok');
+          copyBtn.textContent = 'Kopiert ✓';
+          copyBtn.setAttribute('aria-pressed', 'true');
+          // Status bleibt gesetzt – kein Zurücksetzen.
+        };
+        try {
+          await navigator.clipboard.writeText(chunk);
+          doMarkOk();
+        } catch {
+          // Fallback: Auswahl + execCommand
+          const ta = wrap.querySelector('textarea');
+          ta.focus(); ta.select();
+          const ok = document.execCommand && document.execCommand('copy');
+          if (ok) doMarkOk();
+        }
+      });
+
+      right.appendChild(copyBtn);
+      header.appendChild(left);
+      header.appendChild(right);
+
+      const ta = document.createElement('textarea');
+      ta.value = chunk;
+      ta.rows = Math.min(16, Math.max(8, Math.ceil(chars / 300)));
+
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent =
+        (chars >= MIN_CHARS && chars <= MAX_CHARS)
+          ? '✓ innerhalb der Zielspanne'
+          : (chars < MIN_CHARS ? '⚠ unter 4.000 – Restlogik' : '⚠ über 5.000 – Satzschutz');
+
+      wrap.appendChild(header);
+      wrap.appendChild(ta);
+      wrap.appendChild(hint);
+      elResults.appendChild(wrap);
+    });
+
+    elParts.textContent = chunks.length;
+  }
+
+  function updateTotals() {
+    elTotalChars.textContent = charLen(elInput.value).toLocaleString('de-DE');
+  }
+
+  elCut.addEventListener('click', () => {
+    const text = softNormalize(elInput.value || '');
+    const target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, Number(elTarget.value) || 4500));
+    const chunks = chunkByChars(text, target, MIN_CHARS, MAX_CHARS);
+    renderChunks(chunks);
+    updateTotals();
+  });
+
+  elClear.addEventListener('click', () => {
+    elInput.value = '';
+    elResults.innerHTML = '';
+    elParts.textContent = '0';
+    elTotalChars.textContent = '0';
+    elTarget.value = 4500;
+  });
+
+  elInput.addEventListener('input', updateTotals);
+  updateTotals();
+})();
+</script>
+</body>
+</html>
